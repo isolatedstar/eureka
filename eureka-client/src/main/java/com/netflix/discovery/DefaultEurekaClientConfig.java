@@ -87,7 +87,7 @@ public class DefaultEurekaClientConfig implements EurekaClientConfig {
 
     /*
      * (non-Javadoc)
-     *
+     * 注册表抓取时间间隔 默认30秒
      * @see
      * com.netflix.discovery.EurekaClientConfig#getRegistryFetchIntervalSeconds
      * ()

@@ -86,6 +86,7 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
     // CircularQueues here for debugging/statistics purposes only
     private final CircularQueue<Pair<Long, String>> recentRegisteredQueue;
     private final CircularQueue<Pair<Long, String>> recentCanceledQueue;
+    // 最近变更队列
     private ConcurrentLinkedQueue<RecentlyChangedItem> recentlyChangedQueue = new ConcurrentLinkedQueue<RecentlyChangedItem>();
 
     private final ReentrantReadWriteLock readWriteLock = new ReentrantReadWriteLock();
@@ -191,6 +192,9 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
     public void register(InstanceInfo registrant, int leaseDuration, boolean isReplication) {
         try {
             read.lock();
+
+            // registry : "serverA" : {"i-00000": Lease<InstanceInfo>}
+            // Map<String(服务实例ID), Lease<InstanceInfo>(服务实例租约)>
             Map<String, Lease<InstanceInfo>> gMap = registry.get(registrant.getAppName());
             REGISTER.increment(isReplication);
             if (gMap == null) {
@@ -230,6 +234,8 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
             if (existingLease != null) {
                 lease.setServiceUpTimestamp(existingLease.getServiceUpTimestamp());
             }
+
+            // 放入注册表Map中
             gMap.put(registrant.getId(), lease);
             synchronized (recentRegisteredQueue) {
                 recentRegisteredQueue.add(new Pair<Long, String>(
@@ -262,6 +268,8 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
             registrant.setActionType(ActionType.ADDED);
             recentlyChangedQueue.add(new RecentlyChangedItem(lease));
             registrant.setLastUpdatedTimestamp();
+
+            // 刷新缓存responseCache client断拉取注册表的时候从一个2级缓存Map中抓取
             invalidateCache(registrant.getAppName(), registrant.getVIPAddress(), registrant.getSecureVipAddress());
             logger.info("Registered instance {}/{} with status {} (replication={})",
                     registrant.getAppName(), registrant.getId(), registrant.getStatus(), isReplication);
@@ -301,8 +309,11 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
             Map<String, Lease<InstanceInfo>> gMap = registry.get(appName);
             Lease<InstanceInfo> leaseToCancel = null;
             if (gMap != null) {
+                // 从本地server的注册表移除
                 leaseToCancel = gMap.remove(id);
             }
+
+            // 最近下线的队列
             synchronized (recentCanceledQueue) {
                 recentCanceledQueue.add(new Pair<Long, String>(System.currentTimeMillis(), appName + "(" + id + ")"));
             }
@@ -315,17 +326,24 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
                 logger.warn("DS: Registry: cancel failed because Lease is not registered for: {}/{}", appName, id);
                 return false;
             } else {
+
+                // 修改下线时间戳
                 leaseToCancel.cancel();
                 InstanceInfo instanceInfo = leaseToCancel.getHolder();
                 String vip = null;
                 String svip = null;
                 if (instanceInfo != null) {
                     instanceInfo.setActionType(ActionType.DELETED);
+
+                    // 服务变化都会加到这个队列
                     recentlyChangedQueue.add(new RecentlyChangedItem(leaseToCancel));
+                    // 变更最后更新时间
                     instanceInfo.setLastUpdatedTimestamp();
                     vip = instanceInfo.getVIPAddress();
                     svip = instanceInfo.getSecureVipAddress();
                 }
+
+                // 更新缓存
                 invalidateCache(appName, vip, svip);
                 logger.info("Cancelled instance {}/{} (replication={})", appName, id, isReplication);
                 return true;
@@ -374,6 +392,8 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
 
                 }
             }
+
+            // 每次心跳都记录一次  自我保护机制获取上一分钟的心跳次数 从这获取
             renewsLastMin.increment();
             leaseToRenew.renew();
             return true;
@@ -579,6 +599,7 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
     public void evict(long additionalLeaseMs) {
         logger.debug("Running the evict task");
 
+        //  判断是否开启自我保护机制  默认true  关闭了才能摘除服务
         if (!isLeaseExpirationEnabled()) {
             logger.debug("DS: lease expiration is currently disabled.");
             return;
@@ -587,12 +608,18 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
         // We collect first all expired items, to evict them in random order. For large eviction sets,
         // if we do not that, we might wipe out whole apps before self preservation kicks in. By randomizing it,
         // the impact should be evenly distributed across all applications.
+        // 判断服务实例的租约是否过期  如果过期失效说明实例故障了
         List<Lease<InstanceInfo>> expiredLeases = new ArrayList<>();
         for (Entry<String, Map<String, Lease<InstanceInfo>>> groupEntry : registry.entrySet()) {
             Map<String, Lease<InstanceInfo>> leaseMap = groupEntry.getValue();
             if (leaseMap != null) {
                 for (Entry<String, Lease<InstanceInfo>> leaseEntry : leaseMap.entrySet()) {
                     Lease<InstanceInfo> lease = leaseEntry.getValue();
+                    // 其实就是判断最后活跃时间  就是心跳刷新的时间
+                    // 判断当前时间是否大于上一次心跳时间加上duration（默认90秒）加上任务调度的超时时间
+                    // 意思就是如果90秒都没有心跳 则说明故障了
+                    // 这里有一个BUG 其实心跳时间也加上了duration  也就是等于2个90秒才判断为故障 实际是180秒
+                    // 还有多级缓存  所以机器故障了 得几分钟其它机器才感知到
                     if (lease.isExpired(additionalLeaseMs) && lease.getHolder() != null) {
                         expiredLeases.add(lease);
                     }
@@ -602,8 +629,13 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
 
         // To compensate for GC pauses or drifting local time, we need to use current registry size as a base for
         // triggering self-preservation. Without that we would wipe out full registry.
+
+        // 不能一次摘除过多的实例
+        // 假设有20个实例  有6个不能用
         int registrySize = (int) getLocalRegistrySize();
+        // 20 * 0.85 = 17
         int registrySizeThreshold = (int) (registrySize * serverConfig.getRenewalPercentThreshold());
+        // 20 - 17 = 3 也就是说这次只能摘除3个服务实例
         int evictionLimit = registrySize - registrySizeThreshold;
 
         int toEvict = Math.min(expiredLeases.size(), evictionLimit);
@@ -1218,6 +1250,8 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
         if (evictionTaskRef.get() != null) {
             evictionTaskRef.get().cancel();
         }
+
+        // 默认60秒做一次检查
         evictionTaskRef.set(new EvictionTask());
         evictionTimer.schedule(evictionTaskRef.get(),
                 serverConfig.getEvictionIntervalTimerInMs(),
@@ -1243,11 +1277,14 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
 
         private final AtomicLong lastExecutionNanosRef = new AtomicLong(0l);
 
+        // 健康检查任务
         @Override
         public void run() {
             try {
+                // 获取一个补偿时间 判断两次检查调度任务是否超过设置的执行时间  默认60秒
                 long compensationTimeMs = getCompensationTimeMs();
                 logger.info("Running the evict task with compensationTime {}ms", compensationTimeMs);
+                // 判断实例状况
                 evict(compensationTimeMs);
             } catch (Throwable e) {
                 logger.error("Could not run the evict task", e);
@@ -1261,14 +1298,20 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
          * according to the configured cycle.
          */
         long getCompensationTimeMs() {
+            // 获取当前时间
             long currNanos = getCurrentTimeNano();
+            // 上一次这个任务被执行的时间 将当前时间设置进去
             long lastNanos = lastExecutionNanosRef.getAndSet(currNanos);
             if (lastNanos == 0l) {
                 return 0l;
             }
 
+            // 对比上一次检测时间和这次的时间差
             long elapsedMs = TimeUnit.NANOSECONDS.toMillis(currNanos - lastNanos);
+            // 然后再减去健康检查的时间
             long compensationTime = elapsedMs - serverConfig.getEvictionIntervalTimerInMs();
+
+            // 如正确结果应该就是0 健康检查任务执行的时间默认60秒  如果不等于0说明出现什么状况了 检查任务没有按时出发
             return compensationTime <= 0l ? 0l : compensationTime;
         }
 
@@ -1324,6 +1367,7 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
             public void run() {
                 Iterator<RecentlyChangedItem> it = recentlyChangedQueue.iterator();
                 while (it.hasNext()) {
+                    // 每30秒你会检查队列里面是否有超过180秒的  如果有则移除掉
                     if (it.next().getLastUpdateTime() <
                             System.currentTimeMillis() - serverConfig.getRetentionTimeInMSInDeltaQueue()) {
                         it.remove();

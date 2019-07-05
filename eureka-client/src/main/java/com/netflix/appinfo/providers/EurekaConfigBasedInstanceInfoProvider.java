@@ -44,10 +44,13 @@ public class EurekaConfigBasedInstanceInfoProvider implements Provider<InstanceI
 
     @Override
     public synchronized InstanceInfo get() {
+        // 如果为null则创建
         if (instanceInfo == null) {
             // Build the lease information to be passed to the server based on config
             LeaseInfo.Builder leaseInfoBuilder = LeaseInfo.Builder.newBuilder()
+                    // 心跳时间间隔 默认30秒
                     .setRenewalIntervalInSecs(config.getLeaseRenewalIntervalInSeconds())
+                    // 持续时间
                     .setDurationInSecs(config.getLeaseExpirationDurationInSeconds());
 
             if (vipAddressResolver == null) {
@@ -81,6 +84,7 @@ public class EurekaConfigBasedInstanceInfoProvider implements Provider<InstanceI
                 defaultAddress = config.getIpAddress();
             }
 
+            // 利用构造器模式构造 服务实例
             builder.setNamespace(config.getNamespace())
                     .setInstanceId(instanceId)
                     .setAppName(config.getAppname())

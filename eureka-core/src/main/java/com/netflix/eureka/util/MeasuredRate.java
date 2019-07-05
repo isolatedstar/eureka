@@ -54,6 +54,8 @@ public class MeasuredRate {
                 public void run() {
                     try {
                         // Zero out the current bucket.
+                        // 一分钟一到就把上一分钟的心跳次数设置到lastBucket
+                        // 把currentBucket重置为0
                         lastBucket.set(currentBucket.getAndSet(0));
                     } catch (Throwable e) {
                         logger.error("Cannot reset the Measured Rate", e);
@@ -83,6 +85,7 @@ public class MeasuredRate {
      * Increments the count in the current sample interval.
      */
     public void increment() {
+        // 心跳一次加1
         currentBucket.incrementAndGet();
     }
 }

@@ -43,6 +43,7 @@ import static org.mockito.Mockito.when;
  * which is essential to verifying content encoding/decoding with different format types (JSON vs XML, compressed vs
  * uncompressed).
  *
+ *
  * @author Tomasz Bak
  */
 public class EurekaClientServerRestIntegrationTest {
@@ -127,6 +128,7 @@ public class EurekaClientServerRestIntegrationTest {
         assertThat(heartBeatResponse.getEntity(), is(nullValue()));
     }
 
+    // 测试心跳发不全
     @Test
     public void testMissedHeartbeat() throws Exception {
         InstanceInfo instanceInfo = instanceInfoIt.next();
@@ -137,6 +139,7 @@ public class EurekaClientServerRestIntegrationTest {
         assertThat(heartBeatResponse.getStatusCode(), is(equalTo(404)));
     }
 
+    // 摘除一个注册
     @Test
     public void testCancelForEntryThatExists() throws Exception {
         // Register first
@@ -158,6 +161,7 @@ public class EurekaClientServerRestIntegrationTest {
         assertThat(httpResponse.getStatusCode(), is(equalTo(404)));
     }
 
+    //测试状态更像
     @Test
     public void testStatusOverrideUpdateAndDelete() throws Exception {
         // Register first
@@ -232,18 +236,28 @@ public class EurekaClientServerRestIntegrationTest {
     }
 
     private static void startServer() throws Exception {
-        File warFile = findWar();
+//        File warFile = findWar();
+//
+//        server = new Server(8080);
+//
+//        WebAppContext webapp = new WebAppContext();
+//        webapp.setContextPath("/");
+//        webapp.setWar(warFile.getAbsolutePath());
+//        server.setHandler(webapp);
+//
+//        server.start();
 
         server = new Server(8080);
 
-        WebAppContext webapp = new WebAppContext();
-        webapp.setContextPath("/");
-        webapp.setWar(warFile.getAbsolutePath());
-        server.setHandler(webapp);
-
+        WebAppContext webAppCtx = new WebAppContext(new File("./eureka-server/src/main/webapp").getAbsolutePath(), "/");
+        webAppCtx.setDescriptor(new File("./eureka-server/src/main/webapp/WEB-INF/web.xml").getAbsolutePath());
+        webAppCtx.setResourceBase(new File("./eureka-server/src/main/resources").getAbsolutePath());
+        webAppCtx.setClassLoader(Thread.currentThread().getContextClassLoader());
+        server.setHandler(webAppCtx);
         server.start();
 
         eurekaServiceUrl = "http://localhost:8080/v2";
+
     }
 
     private static File findWar() {

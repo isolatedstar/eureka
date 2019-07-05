@@ -68,7 +68,8 @@ import javax.inject.Singleton;
  * Primary operations that are replicated are the
  * <em>Registers,Renewals,Cancels,Expirations and Status Changes</em>
  * </p>
- *
+ *  Eureka-Server 启动的时候，会尝试从其他的Eureka-Server抓取注册表信息，
+ *  如果抓取失败，那么就不会让其他的服务实例来自己这里进行服务发现，获取自己注册表的信息
  * <p>
  * When the eureka server starts up it tries to fetch all the registry
  * information from the peer eureka nodes.If for some reason this operation
@@ -78,6 +79,9 @@ import javax.inject.Singleton;
  * </p>
  *
  * <p>
+ *   如果当前Eureka-Server 获取心跳的比例低于一定的比例，在一定的时间内，比如一共有20个服务实例，在15分钟内就只有10个服务实例
+ *   发来了心跳，Eureka-Server就自动认为自己出现了网络故障, 进入一个自我保护机制， 不会摘除任何服务实例
+ *
  * One important thing to note about <em>renewals</em>.If the renewal drops more
  * than the specified threshold as specified in
  * {@link com.netflix.eureka.EurekaServerConfig#getRenewalPercentThreshold()} within a period of
@@ -237,6 +241,8 @@ public class PeerAwareInstanceRegistryImpl extends AbstractInstanceRegistry impl
     public void openForTraffic(ApplicationInfoManager applicationInfoManager, int count) {
         // Renewals happen every 30 seconds and for a minute it should be a factor of 2.
         this.expectedNumberOfClientsSendingRenews = count;
+
+        // count * （ 60/getExpectedClientRenewalIntervalSeconds(默认30秒) ）* 0.85
         updateRenewsPerMinThreshold();
         logger.info("Got {} instances from neighboring DS node", count);
         logger.info("Renew threshold is: {}", numberOfRenewsPerMinThreshold);
@@ -252,6 +258,8 @@ public class PeerAwareInstanceRegistryImpl extends AbstractInstanceRegistry impl
         }
         logger.info("Changing status to UP");
         applicationInfoManager.setInstanceStatus(InstanceStatus.UP);
+
+        // 检查是故障
         super.postInit();
     }
 
@@ -480,6 +488,9 @@ public class PeerAwareInstanceRegistryImpl extends AbstractInstanceRegistry impl
             // The self preservation mode is disabled, hence allowing the instances to expire.
             return true;
         }
+
+        // numberOfRenewsPerMinThreshold 所有服务实例一分钟应该发多少次心跳
+        // getNumOfRenewsInLastMin 上一分钟一共发来多少次心跳
         return numberOfRenewsPerMinThreshold > 0 && getNumOfRenewsInLastMin() > numberOfRenewsPerMinThreshold;
     }
 
